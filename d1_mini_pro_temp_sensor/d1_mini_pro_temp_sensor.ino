@@ -4,7 +4,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include "SparkFunBME280.h"
-
+#include <EEPROM.h>
 
 BME280 mySensor;
 
@@ -16,10 +16,12 @@ const char* mqtt_broker = "192.168.0.48";
 const char* mqtt_user = "";
 const char* mqtt_pwd = "";
 
-const bool DEBUG = false;
+const long sleep_time = 5 * 60 * 1000000;
 
-const char* name = "D1MiniTempSensor3";
-const char* topic = "sensor/D1MiniTempSensor3";
+const bool DEBUG = false;
+byte mac[6];
+
+String name;
 
 WiFiClient esp_client;
 PubSubClient mqtt_client(esp_client);
@@ -37,20 +39,33 @@ void log_serialln(String message) {
 }
 
 void connect_wifi() {
+  WiFi.macAddress(mac);
   if (DEBUG) {
     log_serialln("Wifi: ");
     log_serial("SSID: ");
     log_serialln(ssid);
     log_serial("PWD: ");
-    log_serialln(password);
+
+    Serial.print("MAC: ");
+    Serial.print(mac[0],HEX);
+    Serial.print(":");
+    Serial.print(mac[1],HEX);
+    Serial.print(":");
+    Serial.print(mac[2],HEX);
+    Serial.print(":");
+    Serial.print(mac[3],HEX);
+    Serial.print(":");
+    Serial.print(mac[4],HEX);
+    Serial.print(":");
+    Serial.println(mac[5],HEX);
   }
   WiFi.begin(ssid, password); //begin WiFi connection
 
   while (WiFi.status() != WL_CONNECTED) {
     log_serial(".");
-    delay(1000); 
+    delay(1000);
   }
-  
+
   log_serialln("");
   log_serial("Connected to ");
   log_serialln(ssid);
@@ -59,6 +74,17 @@ void connect_wifi() {
 }
 
 void connect_mqtt() {
+  name = "D1MiniTempSensor_";
+  name.concat(String(mac[4], HEX));
+  name.concat("_");
+  name.concat(String(mac[5], HEX));
+
+  char charName[name.length() + 1];
+  name.toCharArray(charName, name.length() + 1);
+
+  log_serial("Device name: ");
+  log_serialln(name);
+
   mqtt_client.setServer(mqtt_broker, 1883);
   //client_mqtt.setCallback(callback);
   //Boucle jusqu'à obtenur une reconnexion
@@ -70,7 +96,7 @@ void connect_mqtt() {
     log_serial("] pwd:[");
     log_serial(mqtt_pwd);
     log_serial("]...");
-    if (mqtt_client.connect(name, mqtt_user, mqtt_pwd)) {
+    if (mqtt_client.connect(charName, mqtt_user, mqtt_pwd)) {
       log_serialln("OK");
     } else {
       log_serial("KO, error : ");
@@ -96,7 +122,18 @@ float get_bat() {
   pinMode(A0, INPUT);
   float raw = analogRead(A0);
   float volt=raw/1023.0;
-  return volt*3.7;
+  return raw * 4.36 / 1024.0;
+}
+
+float get_bat_lvl(float bat) {
+  int lvl = (bat - 3.05) * 100 / (4.23 - 3.05);
+  if (lvl > 100 ) {
+    lvl = 100;
+  }
+  if (lvl < 0 ) {
+    lvl = 0;
+  }
+  return lvl;
 }
 
 int get_pressure() {
@@ -114,16 +151,29 @@ void send_data() {
 
 // create an object
   JsonObject& data = jsonBuffer.createObject();
-  data["bat"] = get_bat();
-  data["temp"] = get_temp();
+  float bat = get_bat();
+  data["bat"] = bat;
+  save_value(1, bat);
+  int temp =  get_temp();
+  data["temp"] = temp;
+  save_value(0, temp);
   data["pressure"] = get_pressure();
+  data["bat_lvl"] = get_bat_lvl(bat);
   //data["humidity"] = get_humidity();
 
   char strData[100];
   data.printTo(strData);
   log_serial("Data: ");
   log_serialln(strData);
-  mqtt_client.publish(topic, strData, true);
+  String topic = "sensor/";
+  topic.concat(name);
+
+  log_serial("Publishing to topic: ");
+  log_serialln(topic);
+
+  char charTopic[topic.length()+1];
+  topic.toCharArray(charTopic, topic.length()+1);
+  mqtt_client.publish(charTopic, strData, true);
   delay(500);
 }
 
@@ -144,7 +194,24 @@ void configure_bme280() {
   log_serialln("Sensor is taking a measurement");
   while(mySensor.isMeasuring());
   log_serialln("Measurement done");
-  
+
+}
+
+int read_saved_value(int addr) {
+  byte val = EEPROM.read(addr);
+  if (DEBUG) {
+    Serial.print("Value read: ");
+    Serial.println(val);
+  }
+  return val;
+}
+
+void save_value(int addr, int value) {
+  if (DEBUG) {
+    Serial.print("Saving value: ");
+    Serial.println(value);
+  }
+  EEPROM.write(addr, value);
 }
 
 void setup() {
@@ -152,13 +219,19 @@ void setup() {
   if (DEBUG) {
     Serial.begin(115200);
   }
-  connect_wifi();
-  connect_mqtt();
+  EEPROM.begin(512);
+
   configure_bme280();
-  send_data();
-  mySensor.setMode(0);
+
+  if (read_saved_value(0) != get_temp() || read_saved_value(1) != get_bat()+10) {
+    connect_wifi();
+    connect_mqtt();
+    send_data();
+    mySensor.setMode(0);
+  }
   log_serialln("Going to sleep");
-  ESP.deepSleep(60 * 1000000);
+  EEPROM.end();
+  ESP.deepSleep(sleep_time);
 }
 
 void loop() {
