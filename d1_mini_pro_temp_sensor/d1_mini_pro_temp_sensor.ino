@@ -12,11 +12,13 @@ BME280 mySensor;
 const char* ssid = "";
 const char* password = "";
 
-const char* mqtt_broker = "192.168.0.48";
+const char* mqtt_broker = "";
 const char* mqtt_user = "";
 const char* mqtt_pwd = "";
 
 const long sleep_time = 5 * 60 * 1000000;
+const int addr_temp = 0;
+const int addr_soc = sizeof(int);
 
 const bool DEBUG = false;
 byte mac[6];
@@ -45,6 +47,7 @@ void connect_wifi() {
     log_serial("SSID: ");
     log_serialln(ssid);
     log_serial("PWD: ");
+    log_serialln(password);
 
     Serial.print("MAC: ");
     Serial.print(mac[0],HEX);
@@ -60,10 +63,15 @@ void connect_wifi() {
     Serial.println(mac[5],HEX);
   }
   WiFi.begin(ssid, password); //begin WiFi connection
-
+  int count = 0;
   while (WiFi.status() != WL_CONNECTED) {
     log_serial(".");
     delay(1000);
+    count++;
+    if (count > 30) {
+      log_serialln("Wifi connection timeout, going to sleep");
+      deep_sleep();
+    }
   }
 
   log_serialln("");
@@ -115,7 +123,12 @@ void blink() {
 }
 
 int get_temp() {
-  return mySensor.readTempC();
+  int temp = mySensor.readTempC();
+  if (DEBUG) {
+    Serial.print("Value measured: ");
+    Serial.println(temp);
+  }
+  return temp;
 }
 
 float get_bat() {
@@ -152,13 +165,14 @@ void send_data() {
 // create an object
   JsonObject& data = jsonBuffer.createObject();
   float bat = get_bat();
+  int soc = (int)get_bat_lvl(bat);
   data["bat"] = bat;
-  save_value(1, bat);
+  save_value(addr_soc, soc);
   int temp =  get_temp();
   data["temp"] = temp;
-  save_value(0, temp);
+  save_value(addr_temp, temp);
   data["pressure"] = get_pressure();
-  data["bat_lvl"] = get_bat_lvl(bat);
+  data["bat_lvl"] = soc;
   //data["humidity"] = get_humidity();
 
   char strData[100];
@@ -198,6 +212,7 @@ void configure_bme280() {
 }
 
 int read_saved_value(int addr) {
+  EEPROM.begin(512);
   byte val = EEPROM.read(addr);
   if (DEBUG) {
     Serial.print("Value read: ");
@@ -207,11 +222,19 @@ int read_saved_value(int addr) {
 }
 
 void save_value(int addr, int value) {
+  EEPROM.begin(512);
   if (DEBUG) {
     Serial.print("Saving value: ");
     Serial.println(value);
   }
   EEPROM.write(addr, value);
+  EEPROM.end();
+}
+
+void deep_sleep() {
+  log_serialln("Going to sleep");
+  EEPROM.end();
+  ESP.deepSleep(sleep_time);
 }
 
 void setup() {
@@ -219,19 +242,31 @@ void setup() {
   if (DEBUG) {
     Serial.begin(115200);
   }
-  EEPROM.begin(512);
 
   configure_bme280();
+  int prv_temp = read_saved_value(addr_temp);
+  int prv_bat = read_saved_value(addr_soc);
+  int curr_temp = (int)get_temp();
+  int curr_bat = (int)get_bat_lvl(get_bat());
 
-  if (read_saved_value(0) != get_temp() || read_saved_value(1) != get_bat()+10) {
+  if (DEBUG) {
+    Serial.print("prv_temp=");
+    Serial.print(prv_temp);
+    Serial.print("; cur_temp=");
+    Serial.print(curr_temp);
+    Serial.print("-- prv_bat=");
+    Serial.print(prv_bat);
+    Serial.print("; curr_bat=");
+    Serial.println(curr_bat);
+  } 
+  
+  if (prv_temp != curr_temp || curr_bat < (prv_bat - 10) || curr_bat > (prv_bat + 10) || curr_bat < 5 || curr_bat > 98) {
     connect_wifi();
     connect_mqtt();
     send_data();
     mySensor.setMode(0);
   }
-  log_serialln("Going to sleep");
-  EEPROM.end();
-  ESP.deepSleep(sleep_time);
+  deep_sleep();
 }
 
 void loop() {
