@@ -2,11 +2,17 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
-#include <SPI.h>
-#include "SparkFunBME280.h"
+//#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
 #include <EEPROM.h>
 
-BME280 mySensor;
+#define ON_BATTERY false
+#define DEBUG true
+
+Adafruit_BMP280 mySensor;
+
+//BME280 mySensor;
 
 // Replace with your network credentials
 const char* ssid = "";
@@ -20,7 +26,6 @@ const long sleep_time = 5 * 60 * 1000000;
 const int addr_temp = 0;
 const int addr_soc = sizeof(int);
 
-const bool DEBUG = false;
 byte mac[6];
 
 String name;
@@ -122,8 +127,8 @@ void blink() {
   //delay(2000);
 }
 
-int get_temp() {
-  int temp = mySensor.readTempC();
+float get_temp() {
+  float temp = mySensor.readTemperature();
   if (DEBUG) {
     Serial.print("Value measured: ");
     Serial.println(temp);
@@ -150,7 +155,7 @@ float get_bat_lvl(float bat) {
 }
 
 int get_pressure() {
-  return mySensor.readFloatPressure();
+  return mySensor.readPressure();
 }
 
 int get_humidity() {
@@ -165,10 +170,13 @@ void send_data() {
 // create an object
   JsonObject& data = jsonBuffer.createObject();
   float bat = get_bat();
-  int soc = (int)get_bat_lvl(bat);
+  int soc = 100;
+  if (ON_BATTERY) {
+    int soc = (int)get_bat_lvl(bat); 
+  }
   data["bat"] = bat;
   save_value(addr_soc, soc);
-  int temp =  get_temp();
+  float temp =  get_temp();
   data["temp"] = temp;
   save_value(addr_temp, temp);
   data["pressure"] = get_pressure();
@@ -193,6 +201,11 @@ void send_data() {
 
 void configure_bme280() {
   Wire.begin();
+  if (!mySensor.begin(0x76)) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+  /*
   mySensor.setI2CAddress(0x76);
   if (mySensor.beginI2C() == false) //Begin communication over I2C
   {
@@ -200,7 +213,7 @@ void configure_bme280() {
     while(1); //Freeze
   }
 
-  log_serialln("Connected to sensor");
+  
   mySensor.setMode(0);
   mySensor.setMode(1);
 
@@ -208,7 +221,8 @@ void configure_bme280() {
   log_serialln("Sensor is taking a measurement");
   while(mySensor.isMeasuring());
   log_serialln("Measurement done");
-
+  */
+  log_serialln("Connected to sensor");
 }
 
 int read_saved_value(int addr) {
@@ -233,7 +247,7 @@ void save_value(int addr, int value) {
 
 void deep_sleep() {
   log_serialln("Going to sleep");
-  EEPROM.end();
+  //EEPROM.end();
   ESP.deepSleep(sleep_time);
 }
 
@@ -260,14 +274,20 @@ void setup() {
     Serial.println(curr_bat);
   } 
   
-  if (prv_temp != curr_temp || curr_bat < (prv_bat - 10) || curr_bat > (prv_bat + 10) || curr_bat < 5 || curr_bat > 98) {
+  if (prv_temp != curr_temp || curr_bat < (prv_bat - 10) || curr_bat > (prv_bat + 10) || curr_bat < 5 || curr_bat > 98 || !ON_BATTERY) {
     connect_wifi();
     connect_mqtt();
     send_data();
-    mySensor.setMode(0);
+//    mySensor.setMode(0);
   }
-  deep_sleep();
+  if (ON_BATTERY) {
+    deep_sleep();
+  }
 }
 
 void loop() {
+  if (!ON_BATTERY) {
+    delay(60000);
+    send_data();
+  }
 }
